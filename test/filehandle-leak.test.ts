@@ -184,6 +184,39 @@ describe('leak detection', () => {
   });
 });
 
+describe('syncBuiltinESMExports coverage', () => {
+  function runFixture(file: string, extraArgs: string[] = []): string {
+    return execFileSync(
+      process.execPath,
+      ['--expose-gc', ...extraArgs, path.join(fixturesDir, file)],
+      { encoding: 'utf8' },
+    ).toString();
+  }
+
+  test('a destructured `import { open }` binding, captured before track(), is detected', () => {
+    const out = runFixture('esm-destructured.ts');
+    assert.match(out, /^DETECTED: 1 file handle\(s\) leaked/m);
+  });
+
+  test('a namespace `import * as fsp` binding, captured before track(), is detected', () => {
+    const out = runFixture('esm-namespace.ts');
+    assert.match(out, /^DETECTED: 1 file handle\(s\) leaked/m);
+  });
+
+  test('the same holds via `--import` register (track() active before user imports run)', () => {
+    const registerPath = path.join(fixturesDir, '..', '..', 'src', 'register.ts');
+    const out = runFixture('esm-via-register.ts', [`--import=${registerPath}`]);
+    assert.match(out, /^DETECTED: 1 file handle\(s\) leaked/m);
+  });
+
+  test('CommonJS destructuring (require) is NOT fixed by syncBuiltinESMExports — documented limitation', () => {
+    const out = execFileSync(process.execPath, ['--expose-gc', path.join(fixturesDir, 'cjs-destructured.cjs')], {
+      encoding: 'utf8',
+    }).toString();
+    assert.match(out, /^NOT DETECTED/m);
+  });
+});
+
 describe('strict mode', () => {
   test('a leak crashes the process with LeakedFileHandleError, in a child process', () => {
     let stderr = '';

@@ -1,5 +1,6 @@
 import fsPromises from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 
 import { LeakedFileHandleError } from './errors.ts';
 
@@ -66,14 +67,17 @@ export function isTracking(): boolean {
  * watch it with a `FinalizationRegistry`. Idempotent-unsafe: call `untrack()` before
  * calling `track()` again with different options.
  *
- * Coverage note: this patches the shared `fs.promises` exports object, so it is
- * seen by any caller that reaches `open` through that object at call time —
- * `fs.promises.open(...)`, a `fsPromises` default import, or `require('fs/promises')`.
- * It is **not** seen by code that destructured the named export before `track()`
- * ran (`import { open } from 'node:fs/promises'`) or that imported the module as
- * a namespace (`import * as fsp from 'node:fs/promises'`) — both bind to a
- * snapshot of the original function, independent of later property mutation.
- * See the README's Limitations section.
+ * Coverage note: this patches the shared `fs.promises` exports object, then
+ * calls `module.syncBuiltinESMExports()`, which re-syncs the live-binding storage
+ * cells backing `node:fs/promises`'s ESM named and namespace exports. That covers
+ * `import { open } from 'node:fs/promises'` and `import * as fsp from
+ * 'node:fs/promises'` too — including bindings a module captured before `track()`
+ * ran, since `syncBuiltinESMExports` rewrites the shared cell rather than only
+ * affecting future imports (measured; see the README's How it works section).
+ * It does **not** cover CommonJS destructuring
+ * (`const { open } = require('fs/promises')`) — CJS has no live-binding
+ * mechanism, so that copies the function reference at `require()` time,
+ * before or after `track()`. See the README's Limitations section.
  */
 export function track(options: TrackOptions = {}): void {
   if (originalOpen !== undefined) {
@@ -107,6 +111,7 @@ export function track(options: TrackOptions = {}): void {
     return handle;
   }) as OpenFn;
   fsPromises.open = patched;
+  syncBuiltinESMExports();
 }
 
 /** Undo `track()`: restore the original `fs.promises.open` and forget all state. */
@@ -117,6 +122,7 @@ export function untrack(): void {
   registry = undefined;
   entries.clear();
   leaked = [];
+  syncBuiltinESMExports();
 }
 
 function captureStack(depth: number): string {

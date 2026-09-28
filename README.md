@@ -184,6 +184,21 @@ internally), and closing a stream from `handle.createReadStream()` (which
 also calls `close()` internally) are all recognised as a clean close, verified
 for each case in `test/`.
 
+Mutating `fs.promises.open` only affects code that reads that property at call
+time. To also reach ES module bindings — `import { open } from
+'node:fs/promises'` and `import * as fsp from 'node:fs/promises'` — `track()`
+calls `node:module`'s `syncBuiltinESMExports()` right after patching (and again
+after `untrack()` restores the original). This is a documented Node API for
+exactly this situation: it re-syncs the storage cells backing a core module's
+ESM named/namespace exports to the current state of its CJS-style exports
+object. Measured directly (`test/fixtures/esm-destructured.ts`,
+`esm-namespace.ts`, `esm-via-register.ts`): a leak opened through a
+destructured `open` or a namespace `fsp.open` is detected, including when that
+binding was imported **before** `track()` ran (as it typically is — `import`
+statements are hoisted and evaluated before the rest of a module's top-level
+code) — the sync rewrites the shared cell the binding already points at,
+rather than only affecting bindings created afterward.
+
 If a handle is garbage-collected while still in the tracked set, the
 `FinalizationRegistry` callback fires with the stack captured at open time.
 The registry holds a `WeakRef`-style weak reference to the handle itself (the
@@ -197,20 +212,16 @@ rather than checking once.
 
 ## Limitations
 
-- **Only catches handles reachable through the patched object.** `track()`
-  mutates the shared `fs.promises` exports object, so it is seen by
-  `fs.promises.open(...)`, a default `fsPromises` import, and
-  `require('fs/promises')`. It is **not** seen by code that destructured the
-  named export before `track()` ran (`import { open } from 'node:fs/promises'`)
-  or imported the module as a namespace (`import * as fsp from
-  'node:fs/promises'`) — both bind to the original function at import time,
-  independent of later property mutation on the shared object. This was
-  verified directly: patching the shared object and calling through a
-  destructured or namespace-imported binding in a separate module did not
-  reach the patch, while calling through a default import or `require` did.
-  Prefer `import fs from 'node:fs'` and `fs.promises.open(...)`, or call
-  `fsPromises.open` off a default-imported reference, if this matters for
-  your codebase.
+- **CommonJS destructuring is not covered.** `const { open } = require('fs/promises')`
+  copies the function reference at `require()` time. CommonJS has no
+  live-binding mechanism — `syncBuiltinESMExports()` only rewrites ESM export
+  cells — so this bypasses the patch whether the `require()` happened before
+  or after `track()`. Measured directly
+  (`test/fixtures/cjs-destructured.cjs`): a handle leaked through a
+  CJS-destructured `open` is not detected. Use `require('fs/promises').open(...)`
+  or `require('fs').promises.open(...)` (property access, not destructuring)
+  in CommonJS code if this matters for your codebase. ESM code is not affected
+  by this — see How it works.
 - **Only `fs.promises.open`.** `fs.promises.opendir()` returns a `Dir`, not a
   `FileHandle`, and is out of scope.
 - **Detection is not immediate.** A leak is only reported once V8 actually
